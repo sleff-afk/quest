@@ -27,7 +27,6 @@ API_URL = (
     "cube=acs_yg_total_population_1&drilldowns=Year%2CNation&locale=en&measures=Population"
 )
 
-# Change this to match your Unity Catalog Volume.
 # Set the destination directory path inside the Unity Catalog volume where raw population JSON files will be stored
 POPULATION_VOLUME_PATH = "/Volumes/quest/bls/bls_raw/raw/"
 

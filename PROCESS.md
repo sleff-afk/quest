@@ -79,7 +79,7 @@ The natural key for a BLS observation is:
 
 The population data is unique by nation and year for this use case.
 
-Spark Declarative Pipeline expectations enforce basic data-quality requirements such as non-null observation keys, supported periods, and valid numeric values. I use dropping expectations only when a row cannot safely participate in the downstream analysis. Informational quality conditions can remain non-dropping expectations so an issue can be monitored without unnecessarily losing data.
+Spark Declarative Pipeline expectations enforce basic data-quality requirements such as non-null observation keys, supported periods, and valid numeric values.
 
 For BLS series descriptions, I join `pr.series` to the sector, class, measure, duration, and seasonal mapping files. This produces a human-readable `series_label` so that the Gold output can be understood without knowing the structure of a BLS series ID.
 
