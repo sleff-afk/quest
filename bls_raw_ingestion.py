@@ -66,6 +66,10 @@ print(f"Contact: {CONTACT_EMAIL}")
 
 # Create the Unity Catalog schema if it does not already exist
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`bls_bronze`")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`bls_silver`")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`bls_gold`")
+
 # Create the Unity Catalog volume to hold raw downloaded BLS files if it does not already exist
 spark.sql(f"""
 CREATE VOLUME IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`.`{VOLUME}`
@@ -369,6 +373,7 @@ manifest_rows = {
 }
 # Print the number of manifest records loaded for visibility in the notebook output
 print(f"Loaded {len(manifest_rows)} manifest records")
+print(manifest_rows)
 
 # COMMAND ----------
 
