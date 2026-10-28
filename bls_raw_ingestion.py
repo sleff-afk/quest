@@ -234,12 +234,14 @@ print(f"Configured User-Agent: {USER_AGENT}")
 # Define a custom HTMLParser subclass that extracts all href attributes from <a> tags in directory listings
 class LinkParser(HTMLParser):
     def __init__(self):
+        """Initialize the parser with an empty list to collect discovered href values."""
         # Call the parent HTMLParser constructor to initialize internal state
         super().__init__()
         # Initialize an empty list to collect discovered href values
         self.links = []
 
     def handle_starttag(self, tag, attrs):
+        """Extract href attributes from <a> tags and store them in self.links."""
         # Only process <a> (anchor) tags, which contain links to files and subdirectories
         if tag.lower() != "a":
             return
@@ -252,11 +254,13 @@ class LinkParser(HTMLParser):
 
 
 def canonical_directory_url(url: str) -> str:
+    """Normalize a directory URL to have exactly one trailing slash."""
     # Normalize a directory URL by stripping trailing slashes and appending exactly one trailing slash
     return url.rstrip("/") + "/"
 
 
 def is_within_source_tree(candidate_url: str, root_url: str) -> bool:
+    """Return True if candidate_url shares scheme, host, and path prefix with root_url."""
     # Parse the candidate URL into its components (scheme, netloc, path, etc.)
     candidate = urlparse(candidate_url)
     # Parse the root URL into its components for comparison
@@ -270,6 +274,7 @@ def is_within_source_tree(candidate_url: str, root_url: str) -> bool:
 
 
 def relative_path_from_url(file_url: str, root_url: str) -> str:
+    """Compute the safe relative path from a file URL to the root URL, rejecting path traversal."""
     # Extract and URL-decode the path component of the file URL
     file_path = unquote(urlparse(file_url).path)
     # Extract and URL-decode the path component of the root URL
@@ -284,6 +289,7 @@ def relative_path_from_url(file_url: str, root_url: str) -> str:
 
 
 def discover_bls_files(root_url: str) -> list:
+    """Recursively crawl BLS directory listings and return a sorted list of discovered files."""
     # Normalize the root URL to ensure it ends with a trailing slash
     root_url = canonical_directory_url(root_url)
     # Print a blank line for visual separation in the notebook output
@@ -299,7 +305,7 @@ def discover_bls_files(root_url: str) -> list:
     while pending:
         # Pop the next directory URL to crawl from the pending queue
         directory_url = pending.pop()
-        print(directory_url)
+        # print(directory_url)
         # Skip this directory if it has already been visited (prevents revisiting)
         if directory_url in visited:
             continue
@@ -346,11 +352,11 @@ def discover_bls_files(root_url: str) -> list:
                 # Continue to the next link without treating this as a file
                 continue
             # Compute the relative path of this file from the source root
-            print(candidate_url)
-            print(root_url)
+            #print(candidate_url)
+            #print(root_url)
             relative_path = relative_path_from_url(candidate_url, root_url)
-            print(relative_path)
-            print()
+            #print(relative_path)
+            #print()
             # Store the file in the discovered dictionary, keyed by relative path for deduplication
             discovered[relative_path] = {"source_url": candidate_url, "relative_path": relative_path}
             # print(discovered)
@@ -391,6 +397,7 @@ print(f"Loaded {len(manifest_rows)} manifest records")
 
 # Parse the Content-Length header from an HTTP response into an integer, returning None if absent or invalid
 def parse_content_length(headers):
+    """Parse the Content-Length header into an int, returning None if absent or invalid."""
     # Retrieve the Content-Length header value from the response headers
     value = headers.get("Content-Length")
     try:
@@ -403,6 +410,7 @@ def parse_content_length(headers):
 
 # Send a HEAD request to the BLS server to fetch metadata (ETag, Last-Modified, Content-Length) without downloading the body
 def get_source_metadata(url: str) -> dict:
+    """Fetch ETag, Last-Modified, and Content-Length via HEAD; return None values if HEAD is unsupported."""
     try:
         # Use a context-managed HEAD request to fetch only the response headers
         with bls_request("HEAD", url, stream=True) as response:
@@ -423,26 +431,29 @@ def get_source_metadata(url: str) -> dict:
 
 # Compare previous manifest metadata with current source metadata to determine if a re-download can be skipped
 def metadata_matches(previous, current) -> bool:
+    """Return True if all available metadata fields match, indicating no re-download is needed."""
     # If there is no previous record, or the previous ingestion was not complete or not active, force a re-download
     if not previous or previous.get("ingestion_status") != "COMPLETE" or previous.get("source_status") != "ACTIVE":
         return False
     # Initialize a list to collect boolean comparison results for each available metadata field
     comparisons = []
     # If the current ETag is present, compare it against the previously stored ETag
-    if current.get("etag") is not None:
-        comparisons.append(current["etag"] == previous.get("source_etag"))
+    #if current.get("etag") is not None:
+    #    comparisons.append(current["etag"] == previous.get("source_etag"))
     # If the current Last-Modified is present, compare it against the previously stored value
     if current.get("last_modified") is not None:
         comparisons.append(current["last_modified"] == previous.get("source_last_modified"))
     # If the current Content-Length is present, compare it against the previously stored value
-    if current.get("content_length") is not None:
-        comparisons.append(current["content_length"] == previous.get("source_content_length"))
+    #if current.get("content_length") is not None:
+    #    comparisons.append(current["content_length"] == previous.get("source_content_length"))
     # Return True only if at least one comparison was made and all comparisons matched
+    print(bool(comparisons) and all(comparisons))
     return bool(comparisons) and all(comparisons)
 
 
 # Construct the full destination path in the Unity Catalog volume for a given relative path
 def destination_path(relative_path: str) -> str:
+    """Construct the full UC volume destination path for a relative file path, rejecting path traversal."""
     # Normalize the relative path to remove any redundant separators or references
     safe_path = posixpath.normpath(relative_path)
     # Reject paths that try to escape the raw root directory via parent traversal or absolute paths
@@ -454,6 +465,7 @@ def destination_path(relative_path: str) -> str:
 
 # Download a file from the BLS server to a temporary file, computing its SHA-256 hash during download
 def download_to_temporary_file(source_url: str, final_path: str) -> dict:
+    """Download a file from BLS to a temporary path, computing SHA-256 hash during streaming."""
     # Create the parent directory of the final path so the temp file can be placed alongside it
     os.makedirs(os.path.dirname(final_path), exist_ok=True)
     # Generate a unique temporary file path by appending the run ID and a random hex suffix to the final path
@@ -532,6 +544,7 @@ manifest_schema = StructType([
 
 # Merge a batch of manifest update records into the Delta manifest table using upsert logic
 def merge_manifest(records):
+    """Upsert a batch of manifest records into the Delta table, matching on source_root and relative_path."""
     # If the records list is empty, skip the merge to avoid creating an empty DataFrame
     if not records:
         return
@@ -602,7 +615,7 @@ for index, item in enumerate(source_files, start=1):
             })
             # Skip to the next file since no download was necessary
             continue
-
+        
         # Download the file to a temporary location, computing SHA-256 during download
         downloaded = download_to_temporary_file(source_url, final_path)
         # Retrieve the previous SHA-256 hash if a previous record exists, otherwise None
