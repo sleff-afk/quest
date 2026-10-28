@@ -21,9 +21,7 @@ This separation makes troubleshooting easier and preserves a clear boundary betw
 
 ### BLS ingestion
 
-The BLS ingestion dynamically discovers files from the configured BLS directory rather than maintaining a hardcoded filename list. This matters because the assignment specifically requires the process to continue working when BLS adds, changes, or removes files.
-
-BLS requests use a contact-bearing User-Agent. This follows the BLS guidance referenced in the assignment and also makes the request identify its owner rather than behaving like an anonymous bot.
+The BLS ingestion dynamically discovers files from the configured BLS directory rather than maintaining a hardcoded filename list. BLS requests use a contact-bearing User-Agent. It makes the request identify its owner rather than behaving like an anonymous bot.
 
 I maintain two Delta control tables:
 
@@ -43,23 +41,15 @@ New files are discovered automatically and downloaded. Files that disappear from
 
 The BLS documentation identifies `pr.data.0.Current` as current year-to-date data and `pr.data.1.AllData` as the complete dataset. Both are landed because the assignment requires the full source directory, but the historical analytical pipeline uses `pr.data.1.AllData` as its authoritative observation source. Combining both files without additional handling would duplicate observations.
 
-### Population ingestion
-
-The Data USA population API is a single logical source rather than a directory of related files. I therefore use a simpler ingestion approach for it. The API response is validated and landed as raw JSON in the Unity Catalog Volume.
-
-The intent is to maintain one current population source for the Bronze layer rather than requiring Bronze to determine which of several snapshots is authoritative. When the source has not changed, ingestion should not unnecessarily rewrite it.
-
 ### Bronze layer
 
 Bronze represents the landed source as closely as practical while making it usable by Delta and downstream Spark transformations.
 
 For BLS, separate Bronze tables are created for observations, series definitions, and the mapping files used by the series metadata. The historical observation table reads `pr.data.1.AllData` rather than unioning it with the overlapping current-year file.
 
-The BLS files are tab-delimited text files with headers. Although the BLS documentation lists field lengths, those lengths describe the fields rather than a fixed-width file layout.
+The BLS files are tab-delimited text files with headers. Although the BLS documentation lists field lengths, those lengths describe the fields rather than a fixed-width file layout. Source lineage is retained using Databricks file metadata, including `_metadata.file_path`.
 
-Source lineage is retained using Databricks file metadata, including `_metadata.file_path` rather than the deprecated `input_file_name()` function. This also works with Unity Catalog Volumes.
-
-For the Data USA JSON, source field names are normalized when necessary for Delta compatibility. For example, `Nation ID` becomes `nation_id`. The values themselves remain unchanged in Bronze.
+For the Data USA JSON, source field names are normalized when necessary for Delta compatibility.
 
 ### Silver layer
 

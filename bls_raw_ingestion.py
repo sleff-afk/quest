@@ -185,7 +185,7 @@ bls_session.mount("https://", adapter)
 bls_session.mount("http://", adapter)
 
 
-def bls_request(method: str, url: str):
+def bls_request(method: str, url: str, **kwargs):
     """Send an identified and rate-limited request to BLS."""
     # Sleep for the configured delay to avoid overwhelming the BLS server with rapid requests
     time.sleep(REQUEST_DELAY_SECONDS)
@@ -194,7 +194,9 @@ def bls_request(method: str, url: str):
         method=method,
         url=url,
         timeout=(30, 300),
-        allow_redirects=True
+        allow_redirects=True,
+        **kwargs
+        
     )
     # If BLS returns 403 Forbidden, close the response and raise a descriptive PermissionError
     if response.status_code == 403:
@@ -205,6 +207,7 @@ def bls_request(method: str, url: str):
         )
     # Raise an HTTPError for any other non-2xx status codes
     response.raise_for_status()
+    # print(response.text)
     # Return the successful response object for the caller to consume
     return response
 
@@ -213,15 +216,15 @@ print(f"Configured User-Agent: {USER_AGENT}")
 
 # COMMAND ----------
 
-# Validate access before ingestion
-# This cell sends a test GET request to the BLS source URL to confirm connectivity and permissions.
+# # Validate access before ingestion
+# # This cell sends a test GET request to the BLS source URL to confirm connectivity and permissions.
 
-# Open a context-managed GET request to the BLS source directory URL using the configured session
-with bls_request("GET", SOURCE_URL) as response:
-    # Print the HTTP status code returned by BLS to confirm successful access (expect 200)
-    print(f"BLS access test: HTTP {response.status_code}")
-    # Print the Content-Type header to verify the response is an HTML directory listing
-    print(f"Content-Type: {response.headers.get('Content-Type')}")
+# # Open a context-managed GET request to the BLS source directory URL using the configured session
+# with bls_request("GET", SOURCE_URL) as response:
+#     # Print the HTTP status code returned by BLS to confirm successful access (expect 200)
+#     print(f"BLS access test: HTTP {response.status_code}")
+#     # Print the Content-Type header to verify the response is an HTML directory listing
+#     print(f"Content-Type: {response.headers.get('Content-Type')}")
 
 # COMMAND ----------
 
@@ -296,6 +299,7 @@ def discover_bls_files(root_url: str) -> list:
     while pending:
         # Pop the next directory URL to crawl from the pending queue
         directory_url = pending.pop()
+        print(directory_url)
         # Skip this directory if it has already been visited (prevents revisiting)
         if directory_url in visited:
             continue
@@ -318,6 +322,7 @@ def discover_bls_files(root_url: str) -> list:
 
         # Iterate over every href extracted from the directory listing
         for href in parser.links:
+            # print(href)
             # Skip empty links, self/parent references, and query/fragment-only links
             if not href or href in ("../", "./", "/") or href.startswith(("?", "#")):
                 continue
@@ -341,10 +346,14 @@ def discover_bls_files(root_url: str) -> list:
                 # Continue to the next link without treating this as a file
                 continue
             # Compute the relative path of this file from the source root
+            print(candidate_url)
+            print(root_url)
             relative_path = relative_path_from_url(candidate_url, root_url)
+            print(relative_path)
+            print()
             # Store the file in the discovered dictionary, keyed by relative path for deduplication
             discovered[relative_path] = {"source_url": candidate_url, "relative_path": relative_path}
-
+            # print(discovered)
     # Return the discovered files sorted alphabetically by relative path for deterministic ordering
     return sorted(discovered.values(), key=lambda item: item["relative_path"])
 
@@ -373,7 +382,7 @@ manifest_rows = {
 }
 # Print the number of manifest records loaded for visibility in the notebook output
 print(f"Loaded {len(manifest_rows)} manifest records")
-print(manifest_rows)
+# print(manifest_rows)
 
 # COMMAND ----------
 
@@ -396,7 +405,7 @@ def parse_content_length(headers):
 def get_source_metadata(url: str) -> dict:
     try:
         # Use a context-managed HEAD request to fetch only the response headers
-        with bls_request("HEAD", url) as response:
+        with bls_request("HEAD", url, stream=True) as response:
             # Return a dictionary with the three metadata fields used for change detection
             return {
                 "etag": response.headers.get("ETag"),                # Entity tag for version identification
@@ -474,9 +483,7 @@ def download_to_temporary_file(source_url: str, final_path: str) -> dict:
                         digest.update(chunk)
                         # Accumulate the byte count for the file size
                         total_bytes += len(chunk)
-        # Optional integrity check: compare actual bytes downloaded to Content-Length if provided (currently commented out)
-        #if metadata["content_length"] is not None and total_bytes != metadata["content_length"]:
-        #    raise IOError(f"Incomplete download of {source_url}: expected {metadata['content_length']} bytes, got {total_bytes}")
+
         # Return a dictionary with the temp path, computed hash, file size, and source metadata
         return {
             "temporary_path": temporary_path,
