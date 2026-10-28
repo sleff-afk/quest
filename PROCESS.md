@@ -2,184 +2,99 @@
 
 ## Overview
 
-I approached this project as a small production-style data pipeline rather than as a one-time analysis. The goal was to preserve the raw source data, make ingestion safe to rerun, validate and normalize the data before analysis, and expose simple Gold tables that directly answer the requested questions.
-
-The solution has two parts:
-
-1. Source ingestion into a Databricks Unity Catalog Volume.
-2. A Spark Declarative Pipeline implementing Bronze, Silver, and Gold layers.
-
-The two sources are the Bureau of Labor Statistics (BLS) Major Sector Productivity and Costs bulk-download directory and the Data USA population API.
+I built the project as a rerunnable Databricks data pipeline rather than a one-time analysis. It ingests Bureau of Labor Statistics (BLS) files and Data USA population data into a Unity Catalog Volume, then processes them through Bronze, Silver, and Gold layers using a Spark Declarative Pipeline.
 
 ## Architecture
 
 ### Raw ingestion
 
-I kept source acquisition separate from the Spark Declarative Pipeline. The ingestion code is responsible for interacting with external HTTP endpoints and landing source files in a Unity Catalog Volume. The pipeline is responsible for interpreting, validating, and transforming those landed files.
-
-This separation makes troubleshooting easier and preserves a clear boundary between source acquisition and data modeling.
+Source acquisition is separate from transformation. Python retrieves the external files and stores them in a Unity Catalog Volume, while the pipeline validates and models the landed data. This preserves the original files and makes failures easier to isolate.
 
 ### BLS ingestion
 
-The BLS ingestion dynamically discovers files from the configured BLS directory rather than maintaining a hardcoded filename list. BLS requests use a contact-bearing User-Agent. It makes the request identify its owner rather than behaving like an anonymous bot.
+The ingestion process discovers files dynamically from the BLS directory and uses a contact-bearing User-Agent for programmatic requests.
 
-I maintain two Delta control tables:
+Two Delta control tables track ingestion:
 
-- `bls_ingestion_manifest`, which stores the state of each discovered source file.
-- `bls_ingestion_runs`, which records the outcome and counts for each ingestion execution.
+- `bls_ingestion_manifest` stores the state of each source file.
+- `bls_ingestion_runs` records each run's outcome and counts.
 
-For each discovered file, ingestion collects available HTTP metadata such as ETag, Last-Modified, and Content-Length. If that metadata matches a previously completed active manifest record and the local file still exists, the file is skipped.
+HTTP metadata such as ETag, Last-Modified, and Content-Length is used to skip unchanged files. When that metadata is insufficient, the file is downloaded temporarily and compared using SHA-256. Changed files replace the existing raw copy atomically, new files are added, and files removed upstream are marked `REMOVED` without deleting the landed copy.
 
-When metadata cannot prove that a file is unchanged, the file is downloaded to a temporary path and SHA-256 is calculated while it is streamed. The hash is then compared with the previous manifest value. If the bytes are unchanged, the temporary file is discarded. If the content changed, the temporary file atomically replaces the current raw file.
+Both `pr.data.0.Current` and `pr.data.1.AllData` are landed, but analysis uses `pr.data.1.AllData` because it contains the complete history. Combining both would duplicate current-year observations.
 
-This gives the ingestion two levels of change detection:
+### Bronze
 
-1. HTTP metadata provides a low-cost way to skip clearly unchanged files.
-2. SHA-256 provides content-level verification when a download is necessary.
+Bronze represents the landed data with minimal changes. Separate BLS tables store observations, series definitions, and mapping data. The source files are tab-delimited, and lineage is retained with `_metadata.file_path`.
 
-New files are discovered automatically and downloaded. Files that disappear from the upstream directory are marked `REMOVED` in the manifest. I preserve their previously landed raw copies rather than physically deleting them. This preserves auditability while ensuring the manifest identifies which files are currently active upstream.
+Data USA JSON fields are normalized where needed for Delta compatibility, such as changing `Nation ID` to `nation_id`.
 
-The BLS documentation identifies `pr.data.0.Current` as current year-to-date data and `pr.data.1.AllData` as the complete dataset. Both are landed because the assignment requires the full source directory, but the historical analytical pipeline uses `pr.data.1.AllData` as its authoritative observation source. Combining both files without additional handling would duplicate observations.
+### Silver
 
-### Bronze layer
+Silver makes the data reliable for analysis by:
 
-Bronze represents the landed source as closely as practical while making it usable by Delta and downstream Spark transformations.
+- trimming and standardizing fields;
+- casting years and values to appropriate types;
+- validating required keys, periods, and numeric values;
+- deduplicating BLS observations by `(series_id, year, period)`;
+- normalizing population data; and
+- joining BLS mapping tables to create a readable `series_label`.
 
-For BLS, separate Bronze tables are created for observations, series definitions, and the mapping files used by the series metadata. The historical observation table reads `pr.data.1.AllData` rather than unioning it with the overlapping current-year file.
+The population data is unique by nation and year. Spark Declarative Pipeline expectations enforce core quality rules.
 
-The BLS files are tab-delimited text files with headers. Although the BLS documentation lists field lengths, those lengths describe the fields rather than a fixed-width file layout. Source lineage is retained using Databricks file metadata, including `_metadata.file_path`.
+### Gold
 
-For the Data USA JSON, source field names are normalized when necessary for Delta compatibility.
+Gold tables directly answer the three assignment questions.
 
-### Silver layer
+#### Population statistics
 
-Silver is where I make the data analytically reliable. Responsibilities include:
+The population data is filtered to the United States for 2013 through 2018. The output includes the mean and both population and sample standard deviations because the question does not specify which convention to use.
 
-- trimming string values and column names where required;
-- converting years and numeric values to appropriate Spark types;
-- validating required keys;
-- validating BLS periods;
-- deduplicating natural keys;
-- normalizing population fields; and
-- enriching BLS series codes with their human-readable mapping values.
+#### Best year by BLS series
 
-The natural key for a BLS observation is:
+The calculation excludes `Q05` because it is an annual average, not a fifth quarter. It sums `Q01` through `Q04` by `series_id` and year, retains `quarter_count`, ranks each series by annual total, uses the earliest year to break ties, and includes the readable series label.
 
-`(series_id, year, period)`
+I retained incomplete years rather than silently removing them. The `quarter_count` column makes completeness visible.
 
-The population data is unique by nation and year for this use case.
+#### PRS30006032 joined to population
 
-Spark Declarative Pipeline expectations enforce basic data-quality requirements such as non-null observation keys, supported periods, and valid numeric values.
+The final query filters to `series_id = PRS30006032` and `period = Q01`, then left joins US population by year. A left join preserves every BLS observation and returns a null population when that year is unavailable.
 
-For BLS series descriptions, I join `pr.series` to the sector, class, measure, duration, and seasonal mapping files. This produces a human-readable `series_label` so that the Gold output can be understood without knowing the structure of a BLS series ID.
+## PySpark and SQL
 
-### Gold layer
+PySpark is the primary implementation because the pipeline is Python-based and the DataFrame API supports reusable, testable transformations. Equivalent SQL is included for the three analyses because SQL is especially clear for aggregation, ranking, and joins.
 
-Gold contains outputs designed around the three questions in the assignment rather than generic intermediate datasets.
+Only one implementation materializes each Gold output, avoiding duplicate tables and maintenance.
 
-#### 1. US population statistics, 2013-2018
+## Safe reruns
 
-The population table is filtered to the United States and years 2013 through 2018 inclusive. I calculate the mean and expose both sample and population standard deviation because the question does not explicitly specify which standard-deviation convention to use. Including both makes the statistical interpretation explicit rather than hiding that assumption.
+BLS ingestion handles reruns by discovering files, skipping unchanged content, replacing changed files safely, recording removed files, preserving valid files after failed downloads, and logging each run.
 
-#### 2. Best year for every BLS series
+Stable natural keys and deterministic Silver transformations ensure that the same raw inputs produce the same modeled results.
 
-BLS documentation identifies `Q01` through `Q04` as quarterly periods and `Q05` as an annual average. I therefore exclude `Q05` from the annual sum. Including it would incorrectly treat an annual average as a fifth quarter.
+## Production considerations
 
-The transformation:
+For a production client, I would add:
 
-1. Filters to `Q01`, `Q02`, `Q03`, and `Q04`.
-2. Groups by `series_id` and `year`.
-3. Sums `value` for each year.
-4. Counts distinct quarters so incomplete years remain visible.
-5. Ranks years within each `series_id` by descending annual total.
-6. Uses ascending year as a deterministic tie-breaker.
-7. Joins the human-readable series label.
+- versioned schema checks and quarantine handling;
+- alerts for failed runs, stale data, missing files, size changes, and expectation failures;
+- incremental processing for larger datasets where source update behavior supports it;
+- compute and scheduling based on actual volume and SLA requirements;
+- Unity Catalog least-privilege access for ingestion, pipeline, and analyst identities; and
+- a retention policy for raw files removed upstream.
 
-I chose not to require exactly four quarters, because doing so would silently remove legitimate partial-history or newly released observations. Instead, `quarter_count` is retained so completeness is visible to the consumer.
-
-#### 3. PRS30006032 Q01 joined with population
-
-I filter BLS observations to `series_id = PRS30006032` and `period = Q01`, then left join annual United States population by year.
-
-A left join is intentional. The question asks for population "where available," so a BLS observation should not disappear merely because a matching population year is unavailable.
-
-## PySpark and Spark SQL
-
-I chose PySpark as the primary implementation feeding the Gold tables because the majority of the pipeline is already implemented in Python and the DataFrame API makes transformation composition and testability straightforward.
-
-Each of the three Gold analyses also has an equivalent Spark SQL implementation documented alongside it. I kept one implementation authoritative rather than materializing duplicate SQL and PySpark Gold tables. This demonstrates both APIs without creating two independently maintained production outputs for the same business result.
-
-SQL is particularly readable for aggregation, ranking, and joins. PySpark is useful when transformations need to be composed with reusable programmatic logic. In a larger client implementation I would choose between them per transformation based on team standards, maintainability, and testability rather than enforcing one language everywhere.
-
-## Safe reruns and idempotency
-
-Idempotency is handled primarily at the ingestion boundary.
-
-For BLS:
-
-- filenames are dynamically discovered;
-- new files are downloaded;
-- unchanged files are skipped when HTTP metadata can establish that they have not changed;
-- uncertain files are downloaded to a temporary location and SHA-256 compared;
-- changed files atomically replace the previous raw copy;
-- files removed upstream are recorded as removed in the Delta manifest;
-- failed downloads do not replace a previously valid file; and
-- run-level statistics are recorded separately.
-
-This means rerunning ingestion does not blindly redownload or rewrite every source file.
-
-The Silver layer then uses stable natural keys and deterministic transformations so rerunning the pipeline produces the same modeled state from the same raw inputs.
-
-## Trade-offs and production considerations
-
-### Schema drift
-
-For this exercise, the BLS file schemas are based on the provider documentation and are relatively small and stable. In a production system I would make schema drift more explicit by versioning expected schemas, quarantining unexpected records or columns, and alerting on incompatible changes rather than allowing them to surface only as pipeline failures.
-
-For the Data USA API, I would validate more than the few fields required for this assignment and persist the API/schema version when available.
-
-### Data volume and performance
-
-The BLS PR dataset is small enough that snapshot-oriented processing is simple and inexpensive. For substantially larger sources, I would avoid repeated full-table recomputation and evaluate incremental ingestion patterns, partitioning, clustering, and streaming tables based on the source's update semantics.
-
-I would not automatically use Auto Loader for the mutable BLS `AllData` snapshot simply because files are in cloud storage. The source overwrites a logical snapshot and historical values can be revised, so the incremental strategy must account for updates rather than assume an append-only source.
-
-### Cost
-
-The assignment's data volume does not justify complex optimization. In production I would monitor pipeline runtime, compute utilization, input size, shuffle volume, and table size before optimizing. Serverless or appropriately sized job compute, incremental transformations, and sensible scheduling would be evaluated against actual workload frequency and SLA requirements.
-
-### Access control
-
-For a real client, raw and curated data would have different Unity Catalog privileges. The ingestion identity would receive write access to the raw Volume and control tables. Pipeline identities would receive only the source and target permissions they require. Read-only analysts would normally receive `USE CATALOG`, `USE SCHEMA`, and `SELECT` privileges on approved Gold objects instead of access to raw files or ingestion control tables.
-
-### Monitoring and operations
-
-The run table and manifest provide a starting point for operational visibility. In production I would add alerting for failed ingestion runs, source files unexpectedly disappearing, unusual file-size changes, expectation failures, stale data, and pipeline SLA violations. These could be surfaced through Databricks Jobs/Lakeflow monitoring and an operational dashboard or external observability platform depending on the client's standards.
-
-### Removed source files
-
-I chose to mark disappeared BLS files as removed while preserving previously landed bytes. This favors traceability and recovery over making the Volume a destructive byte-for-byte mirror. A production retention policy could later archive or purge removed raw objects after an agreed retention period.
+I would not automatically use Auto Loader for `pr.data.1.AllData` because it is a mutable snapshot and historical values may be revised.
 
 ## Retrospective
 
-The hardest part was not the three analytical queries. The harder problem was treating the external source correctly.
+The analytical queries were straightforward. The harder part was handling the sources correctly.
 
-The BLS directory looks simple, but several details affect correctness:
+Key issues included the BLS User-Agent requirement, dynamic file discovery, change detection, overlap between the current and historical data files, metadata joins for readable labels, and recognizing that `Q05` is an annual average.
 
-- programmatic access requires an identifiable User-Agent;
-- the folder must be discovered dynamically rather than hardcoded;
-- the ingestion has to distinguish added, changed, unchanged, and removed files;
-- HTTP metadata is useful but is not always sufficient proof that content is identical;
-- `pr.data.0.Current` overlaps with `pr.data.1.AllData`;
-- BLS uses mapping tables to make compact series codes understandable; and
-- `Q05` is an annual average, not a fifth quarter.
+Separating ingestion metadata from analytical data also proved important. The manifest and run tables support auditability and safe reruns without mixing operational state into Bronze business data.
 
-The Data USA source also exposed an implementation detail that is easy to overlook: `Nation ID` is a valid JSON property but is not a convenient default Delta column name. Normalizing it to `nation_id` in Bronze kept the raw values intact while avoiding unnecessary Delta column-mapping complexity.
-
-Another useful lesson was keeping ingestion-state metadata separate from analytical data. The BLS manifest is valuable for safe reruns and auditability, but it is operational state, not a business dataset. That separation keeps Bronze focused on source data while still making ingestion observable and repeatable.
-
-Overall, I optimized the solution for correctness, rerunnability, transparency, and the ability to explain why each layer exists. For the scale of this exercise, I preferred simple deterministic transformations over infrastructure that would add complexity without improving the result.
+Overall, I prioritized correctness, rerunnability, transparency, and simple deterministic transformations appropriate for the size of the assignment.
 
 ## AI Assistance
 
-I used Microsoft Copilot as a reference and development aid to help scaffold portions of the ingestion and Spark Declarative Pipeline code, review SQL and PySpark alternatives, develop tests, and improve documentation. I reviewed and adapted the generated code against the assignment requirements, BLS source documentation, Data USA response structure, and behavior observed in Databricks. I am responsible for the submitted implementation and its design decisions.
+I used Microsoft Copilot to help scaffold code, review SQL and PySpark approaches, develop tests, and refine documentation. I reviewed and adapted the output against the assignment requirements, source documentation, and observed Databricks behavior. I am responsible for the final implementation and design decisions.
